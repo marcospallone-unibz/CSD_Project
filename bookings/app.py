@@ -2,15 +2,75 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
 import pika
-from datetime import date, time, datetime
+from datetime import date
 import requests
-from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+'''from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry'''
+from eventsourcing.domain import Aggregate, event
+from eventsourcing.application import Application
+import os
 
 app = Flask(__name__)
 
 apartmentsIDs = []
 addedID = None
+
+class Booking(Aggregate):
+    @event('Created')
+    def __init__(self, apartmentid, fromDate, toDate, guest):
+        self.apartmentid = apartmentid
+        self.fromDate = fromDate
+        self.toDate = toDate
+        self.guest = guest
+        
+    @event('Updated')
+    def update_booking(self, booking):
+        self.id = booking.id
+        self.apartmentid = booking.apartmentid
+        self.fromDate = booking.fromDate
+        self.toDate = booking.toDate
+        self.guest = booking.guest
+        
+    @event('Removed')
+    def remove_booking(self, booking_id):
+        self.id = booking_id
+        self.apartmentid = None
+        self.fromDate = None
+        self.toDate = None
+        self.guest = None
+        
+class BookingsService(Application):
+    bookingsIDs = []
+    
+    def get_booking_by_id(self, booking_id):
+        booking = self.repository.get(booking_id)
+        return booking
+    
+    def get_bookings(self):
+        bookings = []
+        for id in self.bookingsIDs:
+            b = self.get_booking_by_id(id)
+            if(b!=None):
+                booking = self.toJSON(b)
+                bookings.append(booking)
+        return bookings
+        
+    def insertBooking(self, itemToInsert):
+        booking = Booking(itemToInsert['apartmentid'], itemToInsert['fromDate'], itemToInsert['toDate'], itemToInsert['guest'])
+        self.save(booking)
+        send_booking_message(booking)
+        self.bookingsIDs.append(booking.id)
+        print(booking.collect_events())
+        return booking.id
+    
+    def toJSON(self, booking):
+        bookingJSON = {
+            'apartmentid':booking.apartmentid,
+            'fromDate':booking.fromDate,
+            'toDate':booking.toDate,
+            'guest':booking.guest
+        }
+        return bookingJSON
 
 def listening():
 
@@ -46,8 +106,15 @@ def send_booking_message(booking):
     channel.queue_declare(queue='B-S')
 
     channel.queue_bind('B-S', 'addbooking')
-
-    properties = pika.BasicProperties(headers={'booking':booking, 'from':'bookings'})
+    
+    bookingProperty = {
+        'apartmentid':booking.apartmentid,
+        'fromDate':booking.fromDate,
+        'toDate':booking.toDate,
+        'guest':booking.guest
+    }
+    
+    properties = pika.BasicProperties(headers={'booking':bookingProperty, 'from':'bookings'})
   
     channel.basic_publish(exchange='addbooking', routing_key='', body='Change in bookings!', properties=properties)
    
@@ -195,7 +262,7 @@ def start_rabbit():
 
 @app.route('/bookings/list', methods=['GET'])
 def api_get_bookings():
-    return jsonify(get_bookings())
+    return application.get_bookings()
 
 @app.route('/bookings/add', methods=['POST'])
 def api_add_booking():
@@ -206,10 +273,10 @@ def api_add_booking():
             'toDate': request.args.get('toDate'),
             'guest': request.args.get('guest')
         }
-        insertBooking(itemToInsert)
+        id = application.insertBooking(itemToInsert)
     else:
         print('Apartment not exists')
-    return jsonify(get_bookings())
+    return 'inserted'
 
 @app.route('/bookings/cancel', methods=['POST'])
 def api_remove_booking():
@@ -234,9 +301,12 @@ def api_update_booking():
     return jsonify(get_bookings())
 
 if __name__ == '__main__':
-    retry_strategy = Retry( total=3, backoff_factor=0.5)
+    '''retry_strategy = Retry( total=3, backoff_factor=0.5)
     adapter = HTTPAdapter(max_retries=retry_strategy)
     http = requests.Session()
     http.mount("https://", adapter)
-    http.mount("http://", adapter)
+    http.mount("http://", adapter)'''
+    os.environ["PERSISTENCE MODULE"] = "eventsourcing.sqlite"
+    os.environ["SQLITE_DBNAME"] = "bookings.sqlite"
+    application = BookingsService()
     app.run(host='0.0.0.0', port=8081)
