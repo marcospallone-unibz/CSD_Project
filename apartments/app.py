@@ -8,21 +8,14 @@ app = Flask(__name__)
 def connect_rabbit(insertedItem, action):
     credentials = pika.PlainCredentials('guest', 'guest')
     connection = pika.BlockingConnection(pika.ConnectionParameters('rabbitmq', 5672, '/', credentials))
-
     channel = connection.channel()
-
     channel.exchange_declare('addapartment', 'fanout')
-
     channel.queue_declare(queue='A-B')
     channel.queue_declare(queue='A-S')
-
     channel.queue_bind('A-B', 'addapartment')
     channel.queue_bind('A-S', 'addapartment')
-
     properties = pika.BasicProperties(headers={'id': str(insertedItem['id']), 'action':action, 'from':'apartments'})
-  
     channel.basic_publish(exchange='addapartment', routing_key='', body='Change in apartments!', properties=properties)
-    
     connection.close()
 
 def connect_to_db():
