@@ -3,6 +3,8 @@ from flask_cors import CORS
 import pika
 from datetime import date, datetime
 import requests
+import uuid
+import json
 from eventsourcing.domain import Aggregate, event
 from eventsourcing.application import Application
 import os
@@ -99,11 +101,39 @@ class BookingsService(Application):
     def rollback_to(self, booking_id, version):
         notifications = self.get_events()
         statusToReturn = None
+        n_state = None
         for n in reversed(notifications):
-            if(n.booking_id==booking_id and n.originator_version==version):
+            n_state_json = json.loads(n.state)
+            if (str(n_state_json['booking_id']) == str(booking_id) and str(n.originator_version) == str(version)):
                 statusToReturn = n
-        if(statusToReturn!=None):
-            print(statusToReturn.topic)
+                n_state = n_state_json
+        if(statusToReturn!=None and n_state!=None):
+            if(statusToReturn.topic == '__main__:Booking.Created' or statusToReturn.topic == '__main__:Booking.Updated'):
+                bookingFounded = False
+                for b in self.bookings:
+                    if str(b['booking_id']) == str(booking_id):
+                        bookingFounded = True
+                        b['apartmentid'] = n_state['apartmentid']
+                        b['fromDate'] = n_state['fromDate']
+                        b['toDate'] = n_state['toDate']
+                        b['guest'] = n_state['guest']
+                if(not bookingFounded):
+                    b = {}
+                    b['id'] = uuid.uuid4()
+                    b['booking_id'] = booking_id
+                    b['apartmentid'] = n_state['apartmentid']
+                    b['fromDate'] = n_state['fromDate']
+                    b['toDate'] = n_state['toDate']
+                    b['guest'] = n_state['guest']
+                    self.bookings.append(b)
+            elif(statusToReturn.topic == 'Booking.Removed'):
+                for b in self.bookings:
+                    if str(b['booking_id']) == str(booking_id):
+                        self.bookings.remove(b)
+            else:
+                return 'NOT VALID METHOD'
+        else:
+            'NOTIFICATION EMPTY'
         return statusToReturn
     
     def get_events(self):
