@@ -1,8 +1,9 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from flask_cors import CORS
 import requests
 from urllib.parse import urlparse
 from urllib.parse import parse_qs
+import json
 
 app = Flask(__name__)
 
@@ -14,14 +15,15 @@ ports = {
 
 @app.route('/<path:path>', methods=['GET', 'POST'])
 def general_forwarding(path):
+    res=None
     service = path.partition('/')[0]
     if(request.method == 'GET'):
-        requests.get('http://localhost:'+str(ports[service])+'/'+path)
+        res = requests.get('http://'+str(service)+':'+str(ports[service])+'/'+path)
     elif(request.method == 'POST'):
-        requests.post('http://localhost:'+str(ports[service])+'/'+path, params=parse_qs(urlparse(request.url).query))
+        res =requests.post('http://'+str(service)+':'+str(ports[service])+'/'+path, params=parse_qs(urlparse(request.url).query))
     else:
         return 'NOT ALLOWED METHOD'
-    return 'Request Forwarded to' + service
+    return res.json() if res!=None else json.dumps({'Response': 'Empty response'})
 
 if __name__=='__main__':
     app.run(host='0.0.0.0', port=8000)

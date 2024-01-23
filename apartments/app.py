@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import sqlite3
 import pika
+import json
 
 app = Flask(__name__)
 
@@ -14,7 +15,7 @@ def connect_rabbit(insertedItem, action):
     channel.queue_declare(queue='A-S')
     channel.queue_bind('A-B', 'addapartment')
     channel.queue_bind('A-S', 'addapartment')
-    properties = pika.BasicProperties(headers={'id': str(insertedItem['id']), 'action':action, 'from':'apartments'})
+    properties = pika.BasicProperties(headers={'id': insertedItem['id'], 'action':action, 'from':'apartments'})
     channel.basic_publish(exchange='addapartment', routing_key='', body='Change in apartments!', properties=properties)
     connection.close()
 
@@ -35,7 +36,7 @@ def create_db_table():
         conn.commit()
         print("APARTMENTS table created successfully")
     except:
-        print("APARTMENTS table creation failed - Maybe table")
+        print("APARTMENTS table creation failed")
     finally:
         conn.close()
 
@@ -51,6 +52,7 @@ def checkIfTableExist():
             return True
 
 def insert(itemToInsert):
+    status = False
     inserted = {}
     try:
         conn = connect_to_db()
@@ -60,11 +62,12 @@ def insert(itemToInsert):
         conn.commit()
         inserted = get_apartment_by_id(cur.lastrowid)
         connect_rabbit(inserted, 'add')
+        status = True
     except:
         conn.rollback()
     finally:
         conn.close()
-    return inserted
+    return json.dumps({'Response':'Apartment inserted'}) if status else json.dumps({'Response':'Apartment NOT inserted'})
 
 def get_apartments():
     apartments = []
@@ -83,7 +86,7 @@ def get_apartments():
             apartments.append(apartment)
     except:
         apartments = []
-    return apartments
+    return jsonify(apartments)
 
 def get_apartment_by_id(id):
     apartment = {}
@@ -102,20 +105,25 @@ def get_apartment_by_id(id):
     return apartment
 
 def delete_apartment(id):
+    status = False
     try:
         conn = connect_to_db()
         deleted = get_apartment_by_id(id)
         conn.execute("DELETE from apartments WHERE id = ?",(id))
         conn.commit()
         connect_rabbit(deleted, 'remove')
+        status = True
     except:
         conn.rollback()
     finally:
         conn.close()
+    return json.dumps({'Response':'Apartment removed'}) if status else json.dumps({'Response':'Apartment NOT removed'})
+
 
 @app.route('/apartments/list', methods=['GET'])
 def api_get_apartments():
-    return jsonify(get_apartments())
+    res = get_apartments()
+    return res
 
 @app.route('/apartments/add', methods=['POST'])
 def api_add_apartment():
@@ -125,13 +133,13 @@ def api_add_apartment():
         "name": request.args.get('name'), 
         "size": request.args.get('size') 
     }
-    insert(itemToInsert)
-    return jsonify(get_apartments())
+    res = insert(itemToInsert)
+    return res
 
 @app.route('/apartments/remove', methods=['POST'])
 def api_remove_apartment():
-    delete_apartment(request.args.get('id'))
-    return jsonify(get_apartments())
+    res = delete_apartment(request.args.get('id'))
+    return res
 
 if __name__=='__main__':
     app.run(host='0.0.0.0', port=8080)

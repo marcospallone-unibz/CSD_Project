@@ -1,7 +1,7 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pika
-from datetime import date, datetime
+from datetime import date
 import requests
 import uuid
 import json
@@ -41,13 +41,6 @@ class Booking(Aggregate):
 class BookingsService(Application):
     progressiveID = 0
     bookings = []
-
-    
-    def get_aggregate_by_UUID(self, uuid):
-        return self.repository.get(uuid)
-    
-    def get_booking_by_UUID(self, uuid):
-        return self.toJSON(self.repository.get(uuid))
     
     def get_booking_by_id(self, booking_id):
         booking = {}
@@ -74,32 +67,41 @@ class BookingsService(Application):
         progressiveID=i
         booking = Booking(progressiveID, itemToInsert['apartmentid'], itemToInsert['fromDate'], itemToInsert['toDate'], itemToInsert['guest'])
         self.save(booking)
-        send_booking_message(self.toJSON(booking))
+        send_booking_message(self.toJSON(booking), 'insert')
         self.bookings.append(self.toJSON(booking))
-        return booking.id
+        return json.dumps({'Response': 'Booking inserted'})
     
     def update_booking(self, itemToInsert):
+        status = False
         booking = self.repository.get(itemToInsert['id'])
-        booking.update_booking(itemToInsert['booking_id'], itemToInsert['apartmentid'], itemToInsert['fromDate'], itemToInsert['toDate'], itemToInsert['guest'])
-        self.save(booking)
-        for b in self.bookings:
-            if str(b['booking_id']) == str(itemToInsert['booking_id']):
-                index = self.bookings.index(b)
-                self.bookings[index] = itemToInsert
-        return 'ok'
+        if(booking!=None):
+            booking.update_booking(itemToInsert['booking_id'], itemToInsert['apartmentid'], itemToInsert['fromDate'], itemToInsert['toDate'], itemToInsert['guest'])
+            self.save(booking)
+            send_booking_message(self.toJSON(booking), 'update')
+            for b in self.bookings:
+                if str(b['booking_id']) == str(itemToInsert['booking_id']):
+                    index = self.bookings.index(b)
+                    self.bookings[index] = itemToInsert
+                    status = True
+        return json.dumps({'Response': 'Booking updated'}) if status else json.dumps({'Response': 'Booking NOT updated'})
             
     def remove_booking(self, booking_id):
+        status = False
         booking = self.get_booking_by_id(booking_id)
-        bookingAggregate = self.repository.get(booking['id'])
-        bookingAggregate.remove_booking(bookingAggregate.booking_id)
-        self.save(bookingAggregate)
-        for b in self.bookings:
-            if str(b['booking_id']) == str(booking_id):
-                self.bookings.remove(b)
-        return 'ok'
+        if(booking!=None):
+            bookingAggregate = self.repository.get(booking['id'])
+            if(bookingAggregate!=None):
+                bookingAggregate.remove_booking(bookingAggregate.booking_id)
+                self.save(bookingAggregate)
+                send_booking_message(booking, 'remove')
+                for b in self.bookings:
+                    if str(b['booking_id']) == str(booking_id):
+                        self.bookings.remove(b)
+                        status = True
+        return json.dumps({'Response': 'Booking removed'}) if status else json.dumps({'Response': 'Booking NOT removed'})
     
     def rollback_to(self, booking_id, version):
-        notifications = self.get_events()
+        notifications = self.get_notifications()
         statusToReturn = None
         n_state = None
         for n in reversed(notifications):
@@ -117,28 +119,30 @@ class BookingsService(Application):
                         b['fromDate'] = n_state['fromDate']
                         b['toDate'] = n_state['toDate']
                         b['guest'] = n_state['guest']
+                        send_booking_message(self.toJSON(b), 'rollback')
                 if(not bookingFounded):
                     b = {}
                     b['id'] = uuid.uuid4()
-                    b['booking_id'] = booking_id
+                    b['booking_id'] = int(booking_id)
                     b['apartmentid'] = n_state['apartmentid']
                     b['fromDate'] = n_state['fromDate']
                     b['toDate'] = n_state['toDate']
                     b['guest'] = n_state['guest']
                     self.bookings.append(b)
+                    send_booking_message(self.toJSON(b), 'rollback')
             elif(statusToReturn.topic == 'Booking.Removed'):
                 for b in self.bookings:
                     if str(b['booking_id']) == str(booking_id):
                         self.bookings.remove(b)
+                        send_booking_message(b, 'remove')
             else:
-                return 'NOT VALID METHOD'
+                json.dumps({'ERROR': 'Not valid method'})
         else:
-            'NOTIFICATION EMPTY'
-        return statusToReturn
+            json.dumps({'ERROR': 'Notification empty'})
+        return json.dumps({'Response': 'Rollback performed'})
     
-    def get_events(self):
+    def get_notifications(self):
         notifications = application.notification_log.select(start=1, limit=10)
-        print(notifications)
         return notifications
     
     def toJSON(self, booking):
@@ -174,12 +178,11 @@ def listening():
                 apartmentsIDs.append(properties.headers['id'])
         elif(properties.headers['action']=='remove'):
             apartmentsIDs.remove(properties.headers['id'])
-        print(apartmentsIDs)
     channel.basic_consume(queue='A-B', on_message_callback=callback, auto_ack=True)
     print(' [*] Waiting for messages')
     channel.start_consuming()
 
-def send_booking_message(booking):
+def send_booking_message(booking, action):
     credentials = pika.PlainCredentials('guest', 'guest')
     connection = pika.BlockingConnection(pika.ConnectionParameters('rabbitmq', 5672, '/', credentials))
     channel = connection.channel()
@@ -187,26 +190,27 @@ def send_booking_message(booking):
     channel.queue_declare(queue='B-S')
     channel.queue_bind('B-S', 'addbooking')
     bookingProperty = {
+        'booking_id': booking['booking_id'],
         'apartmentid':booking['apartmentid'],
         'fromDate':booking['fromDate'],
         'toDate':booking['toDate'],
         'guest':booking['guest']
     }
-    properties = pika.BasicProperties(headers={'booking':bookingProperty, 'from':'bookings'})
+    properties = pika.BasicProperties(headers={'booking':bookingProperty, 'from':'bookings', 'action':action}) if action!=None else pika.BasicProperties(headers={'booking':bookingProperty, 'from':'bookings'})
     channel.basic_publish(exchange='addbooking', routing_key='', body='Change in bookings!', properties=properties)
     connection.close()
 
 def directCall_toApartments():
+    global apartmentsIDs
     apartmentsIDs = []
     res = requests.get('http://apartments:8080/apartments/list')
     for a in res.json():
         apartmentsIDs.append(a['id'])
-    print(apartmentsIDs)
 
 @app.route('/bookings/callapartments', methods=['GET'])
 def call_apartments():
     directCall_toApartments()
-    return 'Apartments directly called'
+    return json.dumps({'Response': 'Apartments directly called'})
 
 @app.route('/bookings/start', methods=['GET'])
 def start_rabbit():
@@ -215,22 +219,21 @@ def start_rabbit():
 @app.route('/bookings/list', methods=['GET'])
 def api_get_bookings():
     bookings = application.get_bookings()
-    print(bookings)
-    return 'ok'
+    return jsonify(bookings)
 
 @app.route('/bookings/add', methods=['POST'])
 def api_add_booking():
-    if(request.args.get('apartmentid') in apartmentsIDs):
+    res = None
+    if(str(request.args.get('apartmentid')) in str(apartmentsIDs)):
         booked = False
         fromDate = date.fromisoformat(request.args.get('fromDate'))
         toDate = date.fromisoformat(request.args.get('toDate'))
         for booking in application.get_bookings():
-            print('BOOKING', booking)
             if(booking['apartmentid']==request.args.get('apartmentid')):
                 if(date.fromisoformat(booking['fromDate']) <= fromDate <= date.fromisoformat(booking['toDate'])) or (date.fromisoformat(booking['fromDate']) <= toDate <= date.fromisoformat(booking['toDate'])) or (fromDate <= date.fromisoformat(booking['fromDate']) <= toDate) or ((fromDate <= date.fromisoformat(booking['toDate']) <= toDate)):
                     booked = True                
-        if(booked==True):
-            return 'Already Booked'
+        if(booked):
+            return json.dumps({'ERROR': 'Already booked'})
         else:
             itemToInsert = {
                     'apartmentid': request.args.get('apartmentid'),
@@ -238,42 +241,37 @@ def api_add_booking():
                     'toDate': request.args.get('toDate'),
                     'guest': request.args.get('guest')
             }
-            application.insertBooking(itemToInsert)
+            res = application.insertBooking(itemToInsert)
     else:
-        return 'Apartment not exists'
-    return 'BOOKING INSERTED'
+        return json.dumps({'ERROR': 'Apartment not exists'})
+    return res
 
 @app.route('/bookings/cancel', methods=['POST'])
 def api_remove_booking():
-    application.remove_booking(request.args.get('id'))
-    return 'BOOKING DELETED'
+    res = application.remove_booking(request.args.get('id'))
+    return res
 
 @app.route('/bookings/change', methods=['POST'])
 def api_update_booking():
+    res=None
     fromDate = date.fromisoformat(request.args.get('fromDate'))
     toDate = date.fromisoformat(request.args.get('toDate'))
     bookingToUpdate = application.get_booking_by_id(request.args.get('id'))
-    print('TOUPDATE198', bookingToUpdate)
-    for booking in application.get_bookings():
-        print('BOOKING200', booking)
-        if(bookingToUpdate['apartmentid'] == booking['apartmentid']):
-            if(date.fromisoformat(booking['fromDate']) <= fromDate <= date.fromisoformat(booking['toDate'])) or (date.fromisoformat(booking['fromDate']) <= toDate <= date.fromisoformat(booking['toDate'])) or (fromDate <= date.fromisoformat(booking['fromDate']) <= toDate) or ((fromDate <= date.fromisoformat(booking['toDate']) <= toDate)):
-                print('Already booked') 
-            else:
-                bookingToUpdate['fromDate'] = request.args.get('fromDate')
-                bookingToUpdate['toDate'] = request.args.get('toDate')
-                application.update_booking(bookingToUpdate)
-    return 'BOOKING UPDATED'
-
-@app.route('/bookings/getallevents', methods=['GET'])
-def get_all_events():
-    application.get_events()
-    return 'ok'
+    if(bookingToUpdate!=None):
+        for booking in application.get_bookings():
+            if(bookingToUpdate['apartmentid'] == booking['apartmentid']):
+                if(date.fromisoformat(booking['fromDate']) <= fromDate <= date.fromisoformat(booking['toDate'])) or (date.fromisoformat(booking['fromDate']) <= toDate <= date.fromisoformat(booking['toDate'])) or (fromDate <= date.fromisoformat(booking['fromDate']) <= toDate) or ((fromDate <= date.fromisoformat(booking['toDate']) <= toDate)):
+                    return json.dumps({'ERROR': 'Already booked'})
+                else:
+                    bookingToUpdate['fromDate'] = request.args.get('fromDate')
+                    bookingToUpdate['toDate'] = request.args.get('toDate')
+                    res = application.update_booking(bookingToUpdate)
+    return res
 
 @app.route('/bookings/rollback', methods=['POST'])
 def rollback_to():
-    application.rollback_to(request.args.get('booking_id'), request.args.get('version'))
-    return 'ok'
+    res = application.rollback_to(request.args.get('booking_id'), request.args.get('version'))
+    return res
     
 if __name__ == '__main__':
     os.environ["PERSISTENCE MODULE"] = "eventsourcing.sqlite"
